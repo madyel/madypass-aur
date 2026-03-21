@@ -1,0 +1,77 @@
+# -----------------------
+# Python
+# -----------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenv
+venv/
+.env/
+.envrc/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.coverage
+.coverage.*
+.cache
+pytest_cache/
+
+# -----------------------
+# IDE / Editor
+# -----------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -----------------------
+# OS files
+# -----------------------
+.DS_Store
+Thumbs.db
+
+# -----------------------
+# Logs
+# -----------------------
+*.log
+
+# -----------------------
+# Secrets / config locali
+# -----------------------
+*.env
+config.local.*
+secrets.*
+
+# -----------------------
+# GPG / SSH (IMPORTANTISSIMO)
+# -----------------------
+*.gpg
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+
+# -----------------------
+# AUR / Arch build files
+# -----------------------
+pkg/
+src/
+*.pkg.tar.*
+*.tar.zst
+
+# -----------------------
+# Temporary files
+# -----------------------
+tmp/
+temp/
