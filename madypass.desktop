@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=MadyPass
-Comment=Gestore di password sicure con cifratura
+Comment=Secure password manager with local encryption
 Exec=madypass
 Icon=madypass
 Terminal=false
