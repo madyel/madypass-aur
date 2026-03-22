@@ -18,6 +18,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QHeaderView,
     QLabel,
@@ -222,6 +223,7 @@ class PasswordGeneratorApp(QWidget):
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(3)
         self.table_widget.setHorizontalHeaderLabels(["Timestamp", "Account", "Password"])
+        self.table_widget.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table_widget.horizontalHeader().setStretchLastSection(True)
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_widget.cellDoubleClicked.connect(self.copy_password_from_table)
@@ -294,15 +296,27 @@ class PasswordGeneratorApp(QWidget):
         self.refresh_password_table()
         QMessageBox.information(self, "Saved", "Password encrypted and saved successfully.")
 
+    def build_password_cell(self, password: str) -> QLineEdit:
+        password_field = QLineEdit(password)
+        password_field.setReadOnly(True)
+        password_field.setEchoMode(QLineEdit.Password)
+        password_field.setAlignment(Qt.AlignCenter)
+        password_field.setFrame(False)
+        password_field.setFocusPolicy(Qt.NoFocus)
+        password_field.setStyleSheet("background-color: #3c3f41; color: white; border: none;")
+        return password_field
+
     def refresh_password_table(self) -> None:
         self.table_widget.setRowCount(len(self.entries))
         for row_index, entry in enumerate(self.entries):
-            values = (entry.timestamp, entry.account, entry.masked_password)
-            for column_index, value in enumerate(values):
+            for column_index, value in enumerate((entry.timestamp, entry.account)):
                 item = QTableWidgetItem(value)
-                if column_index == 2:
-                    item.setTextAlignment(Qt.AlignCenter)
                 self.table_widget.setItem(row_index, column_index, item)
+
+            masked_item = QTableWidgetItem(entry.masked_password)
+            masked_item.setTextAlignment(Qt.AlignCenter)
+            self.table_widget.setItem(row_index, 2, masked_item)
+            self.table_widget.setCellWidget(row_index, 2, self.build_password_cell(entry.password))
 
     def show_saved_passwords(self) -> None:
         self.entries = self.store.load_entries()
