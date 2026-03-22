@@ -229,6 +229,10 @@ class PasswordGeneratorApp(QWidget):
         self.table_widget.cellDoubleClicked.connect(self.copy_password_from_table)
         layout.addWidget(self.table_widget)
 
+        self.btn_copy_selected = QPushButton("📋 Copy selected password")
+        self.btn_copy_selected.clicked.connect(self.copy_selected_password)
+        layout.addWidget(self.btn_copy_selected)
+
         self.btn_delete_selected = QPushButton("❌ Delete selected")
         self.btn_delete_selected.clicked.connect(self.delete_selected_password)
         layout.addWidget(self.btn_delete_selected)
@@ -296,16 +300,6 @@ class PasswordGeneratorApp(QWidget):
         self.refresh_password_table()
         QMessageBox.information(self, "Saved", "Password encrypted and saved successfully.")
 
-    def build_password_cell(self, password: str) -> QLineEdit:
-        password_field = QLineEdit(password)
-        password_field.setReadOnly(True)
-        password_field.setEchoMode(QLineEdit.Password)
-        password_field.setAlignment(Qt.AlignCenter)
-        password_field.setFrame(False)
-        password_field.setFocusPolicy(Qt.NoFocus)
-        password_field.setStyleSheet("background-color: #3c3f41; color: white; border: none;")
-        return password_field
-
     def refresh_password_table(self) -> None:
         self.table_widget.setRowCount(len(self.entries))
         for row_index, entry in enumerate(self.entries):
@@ -315,8 +309,8 @@ class PasswordGeneratorApp(QWidget):
 
             masked_item = QTableWidgetItem(entry.masked_password)
             masked_item.setTextAlignment(Qt.AlignCenter)
+            masked_item.setData(Qt.UserRole, entry.password)
             self.table_widget.setItem(row_index, 2, masked_item)
-            self.table_widget.setCellWidget(row_index, 2, self.build_password_cell(entry.password))
 
     def show_saved_passwords(self) -> None:
         self.entries = self.store.load_entries()
@@ -338,11 +332,23 @@ class PasswordGeneratorApp(QWidget):
         logger.info("Password at row %s deleted", row)
         QMessageBox.information(self, "Deleted", "Password deleted successfully.")
 
+    def copy_selected_password(self) -> None:
+        row = self.table_widget.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "Error", "Select a row to copy.")
+            return
+
+        self.copy_password_from_table(row, 2)
+
     def copy_password_from_table(self, row: int, _column: int) -> None:
         if row < 0 or row >= len(self.entries):
             return
 
-        password = self.entries[row].password
+        password_item = self.table_widget.item(row, 2)
+        if password_item is None:
+            return
+
+        password = password_item.data(Qt.UserRole) or self.entries[row].password
         QApplication.clipboard().setText(password)
         logger.info("Password copied from row %s", row)
         QMessageBox.information(self, "Copied", "Password copied to clipboard.")
