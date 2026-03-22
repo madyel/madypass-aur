@@ -1,262 +1,343 @@
 #!/usr/bin/env python3
 
-"""
-Generatore Password Avanzato
-Autore: madyel
-Blog: Webikki
-Versione: 1.0
-Data: 2025-04-11
+"""Madypass - secure password generator and encrypted local vault."""
 
-Questo software consente di generare password sicure, salvarle in modo cifrato,
-visualizzarle in una griglia interattiva, copiarle negli appunti e gestirle in totale sicurezza.
+from __future__ import annotations
 
-Powered by PyQt5 + Cryptography
-"""
-
-import os
-import random
-import string
-import datetime
+import json
 import logging
+import secrets
+import string
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable, List
 
+from cryptography.fernet import Fernet, InvalidToken
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QLabel,
-    QLineEdit, QCheckBox, QPushButton, QSpinBox, QMessageBox,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QApplication,
+    QCheckBox,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt
-from cryptography.fernet import Fernet
 
-# Percorso base nella home dell'utente
-PATH = os.path.expanduser("~/.generate-password")
-os.makedirs(PATH, exist_ok=True)
+APP_NAME = "Madypass"
+APP_DIR = Path.home() / ".generate-password"
+LOG_DIR = APP_DIR / "log"
+KEY_FILE = APP_DIR / "secret.key"
+ENC_FILE = APP_DIR / "passwords.enc"
+LOG_FILE = LOG_DIR / "password_generator.log"
+ICON_PATH = "/usr/share/icons/hicolor/64x64/apps/madypass.png"
+DEFAULT_PASSWORD_LENGTH = 16
+PASSWORD_PLACEHOLDER = "Generated password will appear here"
+SPECIAL_CHARACTERS = "!@#$%^&*()-_=+[]{}|;:,.<>?/"
+DIGITS_ONLY_LABEL = "Digits only"
+MASK_CHARACTER = "•"
 
-# Directory per i log
-log_dir = os.path.join(PATH, "log")
-os.makedirs(log_dir, exist_ok=True)
+APP_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# File path assoluti
-KEY_FILE = os.path.join(PATH, "secret.key")
-ENC_FILE = os.path.join(PATH, "passwords.enc")
-log_path = os.path.join(log_dir, "password_generator.log")
-
-
-# Setup logger
 logging.basicConfig(
-    filename=log_path,
+    filename=LOG_FILE,
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-def load_or_create_key():
-    if not os.path.exists(KEY_FILE):
-        key = Fernet.generate_key()
-        with open(KEY_FILE, "wb") as key_file:
-            key_file.write(key)
-        logger.info("Chiave segreta creata.")
-    else:
-        logger.info("Chiave segreta caricata.")
-        with open(KEY_FILE, "rb") as key_file:
-            key = key_file.read()
-    return Fernet(key)
 
-fernet = load_or_create_key()
+@dataclass(frozen=True)
+class PasswordEntry:
+    timestamp: str
+    account: str
+    password: str
 
-def genera_password(usa_maiuscole=True, usa_numeri=True, usa_speciali=True):
-    caratteri = string.ascii_lowercase
-    if usa_maiuscole:
-        caratteri += string.ascii_uppercase
-    if usa_numeri:
-        caratteri += string.digits
-    if usa_speciali:
-        caratteri += "!@#$%^&*()-_=+[]{}|;:,.<>?/"
-    return caratteri
+    def serialize(self) -> str:
+        return json.dumps(
+            {
+                "timestamp": self.timestamp,
+                "account": self.account,
+                "password": self.password,
+            },
+            ensure_ascii=False,
+        )
 
-def salva_password(nome_account, password):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"{timestamp} | {nome_account} | {password}\n"
-    encrypted = fernet.encrypt(entry.encode())
-    with open(ENC_FILE, "ab") as f:
-        f.write(encrypted + b"\n")
-    logger.info(f"Password salvata per account: {nome_account}")
+    @classmethod
+    def from_serialized(cls, value: str) -> "PasswordEntry | None":
+        raw_value = value.rstrip("\n")
 
-def leggi_password_cifrate():
-    if not os.path.exists(ENC_FILE):
-        logger.warning("Nessun file di password cifrate trovato.")
-        return []
-    righe = []
-    with open(ENC_FILE, "rb") as f:
-        for linea in f:
-            try:
-                decrypted = fernet.decrypt(linea.strip())
-                righe.append(decrypted.decode())
-            except Exception as e:
-                logger.exception("Errore nella decifratura di una riga")
-                righe.append("|||")
-    return righe
+        try:
+            payload = json.loads(raw_value)
+        except json.JSONDecodeError:
+            payload = None
+
+        if isinstance(payload, dict):
+            timestamp = str(payload.get("timestamp", "")).strip()
+            account = str(payload.get("account", "")).strip()
+            password = str(payload.get("password", ""))
+            if timestamp and account and password:
+                return cls(timestamp=timestamp, account=account, password=password)
+
+        legacy_parts = raw_value.split(" | ", maxsplit=2)
+        if len(legacy_parts) != 3:
+            return None
+        return cls(*legacy_parts)
+
+    @property
+    def masked_password(self) -> str:
+        return MASK_CHARACTER * max(8, len(self.password))
+
+
+class PasswordStore:
+    def __init__(self, key_file: Path, data_file: Path):
+        self.key_file = key_file
+        self.data_file = data_file
+        self.fernet = Fernet(self._load_or_create_key())
+
+    def _load_or_create_key(self) -> bytes:
+        if not self.key_file.exists():
+            key = Fernet.generate_key()
+            self.key_file.write_bytes(key)
+            logger.info("Secret key created")
+            return key
+
+        logger.info("Secret key loaded")
+        return self.key_file.read_bytes()
+
+    def save_entry(self, account: str, password: str) -> PasswordEntry:
+        self.data_file.parent.mkdir(parents=True, exist_ok=True)
+        entry = PasswordEntry(
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            account=account,
+            password=password,
+        )
+        encrypted = self.fernet.encrypt(entry.serialize().encode("utf-8"))
+        with self.data_file.open("ab") as file_handle:
+            file_handle.write(encrypted + b"\n")
+        logger.info("Password saved for account: %s", account)
+        return entry
+
+    def load_entries(self) -> List[PasswordEntry]:
+        if not self.data_file.exists():
+            logger.warning("No encrypted password file found")
+            return []
+
+        entries: List[PasswordEntry] = []
+        with self.data_file.open("rb") as file_handle:
+            for line_number, encrypted_line in enumerate(file_handle, start=1):
+                stripped_line = encrypted_line.strip()
+                if not stripped_line:
+                    continue
+                try:
+                    decrypted = self.fernet.decrypt(stripped_line).decode("utf-8")
+                except InvalidToken:
+                    logger.exception("Unable to decrypt line %s", line_number)
+                    continue
+
+                entry = PasswordEntry.from_serialized(decrypted)
+                if entry is None:
+                    logger.warning("Skipping malformed entry on line %s", line_number)
+                    continue
+                entries.append(entry)
+
+        return entries
+
+    def overwrite_entries(self, entries: Iterable[PasswordEntry]) -> None:
+        self.data_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.data_file.open("wb") as file_handle:
+            for entry in entries:
+                encrypted = self.fernet.encrypt(entry.serialize().encode("utf-8"))
+                file_handle.write(encrypted + b"\n")
+        logger.info("Encrypted password store updated")
+
 
 class PasswordGeneratorApp(QWidget):
-    def __init__(self):
+    def __init__(self, store: PasswordStore):
         super().__init__()
-        self.setWindowTitle("Madypass")
-        self.setWindowIcon(QIcon("/usr/share/icons/hicolor/64x64/apps/madypass.png"))
+        self.store = store
+        self.entries: List[PasswordEntry] = []
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QIcon(ICON_PATH))
         self.init_ui()
 
-    def init_ui(self):
+    def init_ui(self) -> None:
         self.resize(1000, 700)
         layout = QVBoxLayout()
 
-        layout.addWidget(QLabel("Nome Account:"))
+        layout.addWidget(QLabel("Account name:"))
         self.account_input = QLineEdit()
         layout.addWidget(self.account_input)
 
-        layout.addWidget(QLabel("Lunghezza Password:"))
+        layout.addWidget(QLabel("Password length:"))
         self.length_input = QSpinBox()
-        self.length_input.setMinimum(4)
-        self.length_input.setMaximum(128)
-        self.length_input.setValue(16)
+        self.length_input.setRange(4, 128)
+        self.length_input.setValue(DEFAULT_PASSWORD_LENGTH)
         layout.addWidget(self.length_input)
 
-        self.chk_maiuscole = QCheckBox("Includi Maiuscole")
-        self.chk_maiuscole.setChecked(True)
-        layout.addWidget(self.chk_maiuscole)
+        self.chk_uppercase = QCheckBox("Include uppercase letters")
+        self.chk_uppercase.setChecked(True)
+        layout.addWidget(self.chk_uppercase)
 
-        self.chk_numeri = QCheckBox("Includi Numeri")
-        self.chk_numeri.setChecked(True)
-        layout.addWidget(self.chk_numeri)
+        self.chk_numbers = QCheckBox("Include numbers")
+        self.chk_numbers.setChecked(True)
+        layout.addWidget(self.chk_numbers)
 
-        self.chk_speciali = QCheckBox("Includi Speciali")
-        self.chk_speciali.setChecked(True)
-        layout.addWidget(self.chk_speciali)
+        self.chk_special = QCheckBox("Include special characters")
+        self.chk_special.setChecked(True)
+        layout.addWidget(self.chk_special)
 
-        self.chk_solo_numeri = QCheckBox("Solo Numeri")
-        self.chk_solo_numeri.setChecked(False)
-        self.chk_solo_numeri.toggled.connect(self.gestisci_solo_numeri)
-        layout.addWidget(self.chk_solo_numeri)
+        self.chk_digits_only = QCheckBox(DIGITS_ONLY_LABEL)
+        self.chk_digits_only.toggled.connect(self.toggle_digits_only_mode)
+        layout.addWidget(self.chk_digits_only)
 
-        self.result_label = QLabel("")
+        self.result_label = QLabel(PASSWORD_PLACEHOLDER)
         self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.result_label)
 
-        self.btn_generate = QPushButton("Genera Password")
-        self.btn_generate.clicked.connect(self.genera_password)
+        self.btn_generate = QPushButton("Generate password")
+        self.btn_generate.clicked.connect(self.generate_password)
         layout.addWidget(self.btn_generate)
 
-        self.btn_copy = QPushButton("📋 Copia negli appunti")
-        self.btn_copy.clicked.connect(self.copia_password)
+        self.btn_copy = QPushButton("📋 Copy to clipboard")
+        self.btn_copy.clicked.connect(self.copy_password)
         layout.addWidget(self.btn_copy)
 
-        self.btn_save = QPushButton("Salva Password")
-        self.btn_save.clicked.connect(self.salva_password)
+        self.btn_save = QPushButton("Save password")
+        self.btn_save.clicked.connect(self.save_password)
         layout.addWidget(self.btn_save)
 
-        self.btn_read = QPushButton("📂 Mostra Password Salvate")
-        self.btn_read.clicked.connect(self.mostra_tabella_password)
+        self.btn_read = QPushButton("📂 Show saved passwords")
+        self.btn_read.clicked.connect(self.show_saved_passwords)
         layout.addWidget(self.btn_read)
 
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(3)
-        self.table_widget.setHorizontalHeaderLabels(["Data", "Account", "Password"])
+        self.table_widget.setHorizontalHeaderLabels(["Timestamp", "Account", "Password"])
         self.table_widget.horizontalHeader().setStretchLastSection(True)
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table_widget.cellDoubleClicked.connect(self.copia_doppio_click)
+        self.table_widget.cellDoubleClicked.connect(self.copy_password_from_table)
         layout.addWidget(self.table_widget)
 
-        self.btn_delete_selected = QPushButton("❌ Elimina Selezionata")
-        self.btn_delete_selected.clicked.connect(self.elimina_password_selezionata)
+        self.btn_delete_selected = QPushButton("❌ Delete selected")
+        self.btn_delete_selected.clicked.connect(self.delete_selected_password)
         layout.addWidget(self.btn_delete_selected)
 
         self.setLayout(layout)
 
-    def gestisci_solo_numeri(self, checked):
-        # Se è selezionato "Solo Numeri", disattiva le altre opzioni
-        self.chk_maiuscole.setEnabled(not checked)
-        self.chk_numeri.setEnabled(not checked)
-        self.chk_speciali.setEnabled(not checked)
+    def toggle_digits_only_mode(self, checked: bool) -> None:
+        for checkbox in (self.chk_uppercase, self.chk_numbers, self.chk_special):
+            checkbox.setEnabled(not checked)
+            if checked:
+                checkbox.setChecked(False)
 
-        # Se selezionato, forza l'uso dei numeri (le altre diventano irrilevanti)
-        if checked:
-            self.chk_maiuscole.setChecked(False)
-            self.chk_numeri.setChecked(False)
-            self.chk_speciali.setChecked(False)
+    def build_charset(self) -> str:
+        if self.chk_digits_only.isChecked():
+            return string.digits
 
-    def genera_password(self):
-        if self.chk_solo_numeri.isChecked():
-            caratteri = string.digits
-        else:
-            caratteri = genera_password(
-            usa_maiuscole=self.chk_maiuscole.isChecked(),
-            usa_numeri=self.chk_numeri.isChecked(),
-            usa_speciali=self.chk_speciali.isChecked()
-            )
+        charset = string.ascii_lowercase
+        if self.chk_uppercase.isChecked():
+            charset += string.ascii_uppercase
+        if self.chk_numbers.isChecked():
+            charset += string.digits
+        if self.chk_special.isChecked():
+            charset += SPECIAL_CHARACTERS
+        return charset
 
-        if not caratteri:
-            QMessageBox.warning(self, "Errore", "Seleziona almeno una categoria di caratteri.")
+    def generate_password(self) -> None:
+        charset = self.build_charset()
+        if not charset:
+            QMessageBox.warning(self, "Error", "Select at least one character category.")
             return
 
-        pwd = ''.join(random.choice(caratteri) for _ in range(self.length_input.value()))
-        logger.info(f"Password generata per account: {self.account_input.text().strip()}")
-        self.result_label.setText(f"{pwd}")
+        password = "".join(secrets.choice(charset) for _ in range(self.length_input.value()))
+        logger.info("Password generated for account: %s", self.account_input.text().strip() or "<empty>")
+        self.result_label.setText(password)
 
+    def current_password(self) -> str:
+        password = self.result_label.text().strip()
+        return "" if password == PASSWORD_PLACEHOLDER else password
 
-    def copia_password(self):
-        password = self.result_label.text().replace("🔐 ", "").strip().replace("<b style='color:#00ffcc; font-size:16px;'>", "").replace("</b>", "")
-        if password:
-            QApplication.clipboard().setText(password)
-            logger.info("Password copiata negli appunti")
-            QMessageBox.information(self, "Copiata!", "Password copiata negli appunti!")
-        else:
-            QMessageBox.warning(self, "Errore", "Nessuna password da copiare.")
+    def copy_password(self) -> None:
+        password = self.current_password()
+        if not password:
+            QMessageBox.warning(self, "Error", "No password available to copy.")
+            return
 
-    def salva_password(self):
-        nome = self.account_input.text().strip()
-        password = self.result_label.text().replace("🔐 ", "").replace("<b style='color:#00ffcc; font-size:16px;'>", "").replace("</b>", "")
-        if nome and (password != "Password generata apparirà qui"):
-            salva_password(nome, password)
-            QMessageBox.information(self, "Salvata", "Password salvata e cifrata correttamente!")
-        else:
-            QMessageBox.warning(self, "Errore", "Inserisci un nome account e genera una password prima di salvare.")
+        QApplication.clipboard().setText(password)
+        logger.info("Password copied to clipboard")
+        QMessageBox.information(self, "Copied", "Password copied to clipboard.")
 
-    def mostra_tabella_password(self):
-        self.table_widget.setRowCount(0)
-        passwords = leggi_password_cifrate()
-        for i, entry in enumerate(passwords):
-            parts = entry.split(" | ")
-            if len(parts) == 3:
-                self.table_widget.insertRow(i)
-                for j, part in enumerate(parts):
-                    self.table_widget.setItem(i, j, QTableWidgetItem(part))
-        logger.info("Password caricate nella griglia")
-        #self.table_widget.resizeColumnsToContents()
+    def save_password(self) -> None:
+        account_name = self.account_input.text().strip()
+        password = self.current_password()
+        if not account_name or not password:
+            QMessageBox.warning(self, "Error", "Enter an account name and generate a password before saving.")
+            return
 
-    def elimina_password_selezionata(self):
+        try:
+            saved_entry = self.store.save_entry(account_name, password)
+        except OSError:
+            logger.exception("Unable to save password for account: %s", account_name)
+            QMessageBox.critical(self, "Save error", "Unable to write the encrypted password file.")
+            return
+
+        self.entries.append(saved_entry)
+        self.refresh_password_table()
+        QMessageBox.information(self, "Saved", "Password encrypted and saved successfully.")
+
+    def refresh_password_table(self) -> None:
+        self.table_widget.setRowCount(len(self.entries))
+        for row_index, entry in enumerate(self.entries):
+            values = (entry.timestamp, entry.account, entry.masked_password)
+            for column_index, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column_index == 2:
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.table_widget.setItem(row_index, column_index, item)
+
+    def show_saved_passwords(self) -> None:
+        self.entries = self.store.load_entries()
+        self.refresh_password_table()
+        logger.info("Saved passwords loaded into table")
+
+    def delete_selected_password(self) -> None:
         row = self.table_widget.currentRow()
         if row < 0:
-            QMessageBox.warning(self, "Errore", "Seleziona una riga da eliminare.")
+            QMessageBox.warning(self, "Error", "Select a row to delete.")
             return
-        with open(ENC_FILE, "rb") as f:
-            righe = f.readlines()
-        del righe[row]
-        with open(ENC_FILE, "wb") as f:
-            for r in righe:
-                f.write(r)
-        self.table_widget.removeRow(row)
-        logger.info(f"Password alla riga {row} eliminata")
-        QMessageBox.information(self, "Eliminata", "Password eliminata correttamente.")
+        if row >= len(self.entries):
+            QMessageBox.warning(self, "Error", "Unable to match the selected row with a stored password.")
+            return
 
-    def copia_doppio_click(self, row, column):
-        password_item = self.table_widget.item(row, 2)
-        if password_item:
-            password = password_item.text()
-            QApplication.clipboard().setText(password)
-            logger.info(f"Password copiata da riga {row}")
-            QMessageBox.information(self, "Copiata!", f"Password copiata: {password}")
+        del self.entries[row]
+        self.store.overwrite_entries(self.entries)
+        self.show_saved_passwords()
+        logger.info("Password at row %s deleted", row)
+        QMessageBox.information(self, "Deleted", "Password deleted successfully.")
 
-def main():
+    def copy_password_from_table(self, row: int, _column: int) -> None:
+        if row < 0 or row >= len(self.entries):
+            return
+
+        password = self.entries[row].password
+        QApplication.clipboard().setText(password)
+        logger.info("Password copied from row %s", row)
+        QMessageBox.information(self, "Copied", "Password copied to clipboard.")
+
+
+def main() -> None:
     app = QApplication([])
-    dark_style = '''
+    app.setStyleSheet(
+        """
         QWidget { background-color: #2b2b2b; color: white; font-family: Consolas; }
         QLabel { font-size: 14px; color: white; }
         QLineEdit, QSpinBox, QTableWidget, QTableWidgetItem {
@@ -267,11 +348,12 @@ def main():
             border: 1px solid #6272a4; padding: 5px; font-weight: bold;
         }
         QPushButton:hover { background-color: #6272a4; }
-    '''
-    app.setStyleSheet(dark_style)
-    window = PasswordGeneratorApp()
+        """
+    )
+    window = PasswordGeneratorApp(PasswordStore(KEY_FILE, ENC_FILE))
     window.show()
     app.exec_()
+
 
 if __name__ == "__main__":
     main()
