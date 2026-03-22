@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 import string
@@ -41,6 +42,7 @@ DEFAULT_PASSWORD_LENGTH = 16
 PASSWORD_PLACEHOLDER = "Generated password will appear here"
 SPECIAL_CHARACTERS = "!@#$%^&*()-_=+[]{}|;:,.<>?/"
 DIGITS_ONLY_LABEL = "Digits only"
+MASK_CHARACTER = "•"
 
 APP_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,14 +62,39 @@ class PasswordEntry:
     password: str
 
     def serialize(self) -> str:
-        return f"{self.timestamp} | {self.account} | {self.password}"
+        return json.dumps(
+            {
+                "timestamp": self.timestamp,
+                "account": self.account,
+                "password": self.password,
+            },
+            ensure_ascii=False,
+        )
 
     @classmethod
     def from_serialized(cls, value: str) -> "PasswordEntry | None":
-        parts = value.rstrip("\n").split(" | ", maxsplit=2)
-        if len(parts) != 3:
+        raw_value = value.rstrip("\n")
+
+        try:
+            payload = json.loads(raw_value)
+        except json.JSONDecodeError:
+            payload = None
+
+        if isinstance(payload, dict):
+            timestamp = str(payload.get("timestamp", "")).strip()
+            account = str(payload.get("account", "")).strip()
+            password = str(payload.get("password", ""))
+            if timestamp and account and password:
+                return cls(timestamp=timestamp, account=account, password=password)
+
+        legacy_parts = raw_value.split(" | ", maxsplit=2)
+        if len(legacy_parts) != 3:
             return None
-        return cls(*parts)
+        return cls(*legacy_parts)
+
+    @property
+    def masked_password(self) -> str:
+        return MASK_CHARACTER * max(8, len(self.password))
 
 
 class PasswordStore:
@@ -86,7 +113,8 @@ class PasswordStore:
         logger.info("Secret key loaded")
         return self.key_file.read_bytes()
 
-    def save_entry(self, account: str, password: str) -> None:
+    def save_entry(self, account: str, password: str) -> PasswordEntry:
+        self.data_file.parent.mkdir(parents=True, exist_ok=True)
         entry = PasswordEntry(
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             account=account,
@@ -96,6 +124,7 @@ class PasswordStore:
         with self.data_file.open("ab") as file_handle:
             file_handle.write(encrypted + b"\n")
         logger.info("Password saved for account: %s", account)
+        return entry
 
     def load_entries(self) -> List[PasswordEntry]:
         if not self.data_file.exists():
@@ -123,6 +152,7 @@ class PasswordStore:
         return entries
 
     def overwrite_entries(self, entries: Iterable[PasswordEntry]) -> None:
+        self.data_file.parent.mkdir(parents=True, exist_ok=True)
         with self.data_file.open("wb") as file_handle:
             for entry in entries:
                 encrypted = self.fernet.encrypt(entry.serialize().encode("utf-8"))
@@ -253,18 +283,30 @@ class PasswordGeneratorApp(QWidget):
             QMessageBox.warning(self, "Error", "Enter an account name and generate a password before saving.")
             return
 
-        self.store.save_entry(account_name, password)
+        try:
+            saved_entry = self.store.save_entry(account_name, password)
+        except OSError:
+            logger.exception("Unable to save password for account: %s", account_name)
+            QMessageBox.critical(self, "Save error", "Unable to write the encrypted password file.")
+            return
+
+        self.entries.append(saved_entry)
+        self.refresh_password_table()
         QMessageBox.information(self, "Saved", "Password encrypted and saved successfully.")
-        self.show_saved_passwords()
+
+    def refresh_password_table(self) -> None:
+        self.table_widget.setRowCount(len(self.entries))
+        for row_index, entry in enumerate(self.entries):
+            values = (entry.timestamp, entry.account, entry.masked_password)
+            for column_index, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column_index == 2:
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.table_widget.setItem(row_index, column_index, item)
 
     def show_saved_passwords(self) -> None:
         self.entries = self.store.load_entries()
-        self.table_widget.setRowCount(len(self.entries))
-
-        for row_index, entry in enumerate(self.entries):
-            for column_index, value in enumerate((entry.timestamp, entry.account, entry.password)):
-                self.table_widget.setItem(row_index, column_index, QTableWidgetItem(value))
-
+        self.refresh_password_table()
         logger.info("Saved passwords loaded into table")
 
     def delete_selected_password(self) -> None:
@@ -289,7 +331,7 @@ class PasswordGeneratorApp(QWidget):
         password = self.entries[row].password
         QApplication.clipboard().setText(password)
         logger.info("Password copied from row %s", row)
-        QMessageBox.information(self, "Copied", f"Password copied: {password}")
+        QMessageBox.information(self, "Copied", "Password copied to clipboard.")
 
 
 def main() -> None:

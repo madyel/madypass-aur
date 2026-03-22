@@ -8,7 +8,7 @@ Madypass is a desktop password generator for **Arch Linux** distributed through 
 - Toggle uppercase letters, numbers, and special characters.
 - Enable a dedicated **digits-only** mode.
 - Save generated passwords in an encrypted local store using `cryptography.Fernet`.
-- Browse saved passwords inside the application.
+- Browse saved passwords inside the application with masked values in the table.
 - Copy passwords from the main output or directly from the saved-password table.
 - Delete stored passwords from the encrypted vault.
 
